@@ -4,37 +4,66 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import cv2
 import numpy as np
-from skimage.metrics import structural_similarity as ssim_metric
 
-# --- ส่วนแก้ปัญหา pkg_resources ---
+# --- แก้ปัญหา pkg_resources ---
 try:
     import pkg_resources
 except (ImportError, ModuleNotFoundError):
     import setuptools
     sys.modules['pkg_resources'] = setuptools
 
-# --- นำเข้า AI YOLOv8 ---
+# --- นำเข้า AI YOLOv8 และ CNN (PyTorch) ---
 try:
     from ultralytics import YOLO
+    import torch
+    from torchvision import models, transforms
+    import torch.nn.functional as F
 except ImportError:
-    messagebox.showerror("ขาด Library", "กรุณาติดตั้ง AI ก่อนโดยพิมพ์:\npip install ultralytics")
+    messagebox.showerror("ขาด Library", "กรุณาติดตั้ง AI และ PyTorch ก่อนโดยพิมพ์:\npip install ultralytics torch torchvision")
     sys.exit()
 
-# Import Logic ของโปรเจกต์
-from auth import verify_face, verify_object_key
+# Import Logic ของโปรเจกต์ (เรียกใช้จากไฟล์เดิมได้เลย)
+from auth import verify_face
 from core_dwt import preprocess_image, embed_watermark, extract_watermark
-from config import IMG_SIZE, WM_SIZE
+from config import IMG_SIZE, WM_SIZE,CNN_SIM_THRESHOLD
 
 # --- ตัวแปรเก็บที่อยู่ไฟล์ ---
 reg_face_path = ""
 reg_obj_path = ""
 login_img_path = ""
 
-# โหลดโมเดล AI เตรียมไว้เลย (ครั้งแรกที่รันจะมีการดาวน์โหลดไฟล์โมเดลขนาดเล็ก ~6MB อัตโนมัติ)
+# 1. โหลดโมเดล YOLO สำหรับ 'หาตำแหน่งวัตถุ'
 print("กำลังโหลดโมเดล AI YOLOv8...")
-model_ai = YOLO("yolov8n.pt") 
-print("โหลด AI สำเร็จ!")
+model_yolo = YOLO("yolov8n.pt") 
 
+# 2. โหลดโมเดล CNN สำหรับ 'เปรียบเทียบความเหมือนแทน SSIM'
+print("กำลังโหลดโมเดล CNN (ResNet18)...")
+cnn_model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+cnn_model.eval() # เซ็ตเป็นโหมดใช้งาน (ไม่ต้องเทรน)
+
+# ตัวแปลงสเกลรูปภาพให้เข้ากับมาตรฐาน CNN
+cnn_transform = transforms.Compose([
+    transforms.ToPILImage(),
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+def extract_cnn_features(img_array):
+    """ฟังก์ชันแปลงรูปภาพเป็น Vector จุดเด่นด้วย CNN"""
+    if len(img_array.shape) == 2: # ถ้าเป็น Grayscale ให้แปลงเป็น RGB ปลอมๆ ให้ CNN เข้าใจ
+        img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
+    elif len(img_array.shape) == 3 and img_array.shape[2] == 4:
+        img_array = cv2.cvtColor(img_array, cv2.COLOR_BGRA2BGR)
+        
+    img_tensor = cnn_transform(img_array).unsqueeze(0)
+    with torch.no_grad():
+        features = cnn_model(img_tensor)
+    return features
+
+# ---------------------------------------------------------
+# ฟังก์ชัน GUI ฝั่งลงทะเบียน (ไม่ต้องแก้ ใช้ลอจิกเดิม)
+# ---------------------------------------------------------
 def select_reg_face():
     global reg_face_path
     path = filedialog.askopenfilename(title="เลือกรูปใบหน้า", filetypes=[("Image files", "*.jpg *.jpeg *.png")])
@@ -74,7 +103,6 @@ def register_action():
         
         messagebox.showinfo("สำเร็จ", "ลงทะเบียนและฝังลายน้ำ (DWT) เรียบร้อยแล้ว!")
         
-        global reg_face_path_temp, reg_obj_path_temp
         reg_face_path = ""
         reg_obj_path = ""
         lbl_reg_face.config(text="ใบหน้า: ยังไม่ได้เลือกไฟล์", fg="gray")
@@ -84,6 +112,9 @@ def register_action():
     except Exception as e:
         messagebox.showerror("ข้อผิดพลาด", f"ไม่สามารถลงทะเบียนได้:\n{str(e)}")
 
+# ---------------------------------------------------------
+# ฟังก์ชัน GUI ฝั่งเข้าสู่ระบบ (อัปเกรดระบบตรวจจับด้วย CNN)
+# ---------------------------------------------------------
 def login_action():
     global login_img_path
     if not login_img_path:
@@ -101,17 +132,20 @@ def login_action():
             messagebox.showerror("ปฏิเสธการเข้าถึง", "ใบหน้าไม่ตรงกับที่ลงทะเบียนไว้!")
             return
 
-        # --- ขั้นที่ 1.5: ใช้ AI (YOLO) ค้นหาและตัดวัตถุ (แบบเผื่อขอบและรักษาสัดส่วน) ---
+        # --- ขั้นที่ 1.5: สกัดลายน้ำ DWT ออกมาเตรียมไว้ ---
         watermarked_face = cv2.imread("db_watermarked_face.png", cv2.IMREAD_GRAYSCALE)
         original_hl = np.load("db_hl.npy")
         extracted_wm = extract_watermark(watermarked_face, original_hl)
         
-        full_scene_img_gray = cv2.imread(login_img_path, cv2.IMREAD_GRAYSCALE)
+        # [จุดเปลี่ยนสำคัญ] แปลงภาพลายน้ำที่ได้ให้กลายเป็น CNN Vector ทิ้งไว้เลย
+        wm_features = extract_cnn_features(extracted_wm)
         
-        # ให้ AI วิเคราะห์รูปภาพ
-        results = model_ai(login_img_path, verbose=False)
+        full_scene_img_color = cv2.imread(login_img_path) # ใช้ภาพสีในการเปรียบเทียบ
         
-        best_ssim_score = -1
+        # ให้ YOLO ช่วยหากรอบวัตถุให้
+        results = model_yolo(login_img_path, verbose=False)
+        
+        best_sim_score = -1.0
         best_cropped_obj = None
         
         for r in results:
@@ -120,74 +154,64 @@ def login_action():
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 class_id = int(box.cls[0])
                 
-                # ข้ามหน้าคน
-                if class_id == 0:
+                if class_id == 0: # ข้ามหน้าคน
                     continue
                 
-                # --- ลอจิกใหม่: สร้างกล่องสี่เหลี่ยมจัตุรัสและเผื่อขอบ (Padding) ---
+                # ลอจิกตีเส้นและเผื่อขอบ Padding ของคุณ Som
                 w = x2 - x1
                 h = y2 - y1
                 center_x = x1 + w // 2
                 center_y = y1 + h // 2
-                
-                # หาด้านที่ยาวที่สุด แล้วทำกล่องให้เป็นสี่เหลี่ยมจัตุรัส (ป้องกันขวดบวมตอนย่อขยาย)
                 max_side = max(w, h)
-                pad = int(max_side * 0.25) # เผื่อพื้นที่สีขาวรอบๆ ออกไป 25% ให้เหมือนต้นฉบับ
+                pad = int(max_side * 0.25)
                 half_size = (max_side // 2) + pad
 
                 new_x1 = max(0, center_x - half_size)
                 new_y1 = max(0, center_y - half_size)
-                new_x2 = min(full_scene_img_gray.shape[1], center_x + half_size)
-                new_y2 = min(full_scene_img_gray.shape[0], center_y + half_size)
+                new_x2 = min(full_scene_img_color.shape[1], center_x + half_size)
+                new_y2 = min(full_scene_img_color.shape[0], center_y + half_size)
                 
-                cropped_ai = full_scene_img_gray[new_y1:new_y2, new_x1:new_x2]
-                
-                if cropped_ai.size == 0:
+                cropped_color = full_scene_img_color[new_y1:new_y2, new_x1:new_x2]
+                if cropped_color.size == 0:
                     continue
                 
-                resized_crop = cv2.resize(cropped_ai, (WM_SIZE, WM_SIZE))
+                # [จุดเปลี่ยนสำคัญ] ใช้ CNN สกัด Vector ออกมาจากกรอบที่ YOLO ตัดมาให้
+                crop_features = extract_cnn_features(cropped_color)
                 
-                # เทียบ SSIM
-                data_range = extracted_wm.max() - extracted_wm.min()
-                if data_range == 0: data_range = 255
-                score = ssim_metric(extracted_wm, resized_crop, data_range=data_range)
+                # เทียบความเหมือนด้วย Cosine Similarity (ค่า 1 คือเหมือนเป๊ะ, 0 คือไม่เหมือน)
+                sim_score = F.cosine_similarity(wm_features, crop_features).item()
                 
-                print(f"AI พบวัตถุ Class {class_id} -> เทียบ SSIM ได้: {score:.4f}")
+                print(f"AI พบวัตถุ Class {class_id} -> ได้ CNN Similarity Score: {sim_score:.4f}")
                 
-                if score > best_ssim_score:
-                    best_ssim_score = score
-                    best_cropped_obj = resized_crop
+                if sim_score > best_sim_score:
+                    best_sim_score = sim_score
+                    best_cropped_obj = cropped_color
 
         if best_cropped_obj is not None:
-            test_obj_img = best_cropped_obj
-        else:
-            test_obj_img = preprocess_image(login_img_path, WM_SIZE)
-        
-        cv2.imwrite("debug_AI_cropped_object.jpg", test_obj_img)
+            cv2.imwrite("debug_AI_cropped_object.jpg", best_cropped_obj)
 
-        # --- ขั้นที่ 2: ตรวจสอบ Object Key ---
-        # **บังคับผ่านถ้าระบบ AI มั่นใจว่าจับวัตถุได้และ SSIM > 0.20**
-        # เนื่องจากงาน DWT Extraction ทำให้เกิด Noise เยอะมาก ค่า 0.20-0.30 ถือว่าเป็นตัวเลขปกติของงานวิจัยลักษณะนี้ครับ
-        if best_ssim_score >= 0.50:
-            is_key_match = True
-        else:
-            is_key_match = False
-        
-        if is_key_match:
-            messagebox.showinfo("สำเร็จ", f"ยืนยันตัวตนสำเร็จ!\nAI ตรวจพบ Object Key ถูกต้อง (SSIM: {best_ssim_score:.2f})")
+        # --- ขั้นที่ 2: ตรวจสอบความถูกต้อง ---
+        # CNN Cosine Similarity ทนทานต่อ Noise ของ DWT ได้ดีกว่ามาก 
+        # ตั้งเกณฑ์ที่ 0.65 - 0.70 ถือว่ายืดหยุ่นและปลอดภัยครับ
+        # --- ขั้นที่ 2: ตรวจสอบความถูกต้อง ---
+        if best_sim_score >= CNN_SIM_THRESHOLD:  # <--- เปลี่ยนเป็นใช้ตัวแปรจาก config
+            messagebox.showinfo("สำเร็จ", f"ยืนยันตัวตนสำเร็จ!\nระบบ CNN ยืนยัน Object Key ถูกต้อง\n(ความเหมือน: {best_sim_score:.2f})")
             login_img_path = ""
             lbl_login_img.config(text="รูปที่เลือก: ยังไม่ได้เลือกไฟล์", fg="gray")
             show_frame(frame_home)
         else:
-            messagebox.showerror("ปฏิเสธการเข้าถึง", f"Object Key ไม่ถูกต้อง!\n(คะแนน SSIM สูงสุดที่ได้: {best_ssim_score:.2f})")
+            messagebox.showerror("ปฏิเสธการเข้าถึง", f"Object Key ไม่ถูกต้อง!\n(คะแนนความเหมือนสูงสุด: {best_sim_score:.2f})")
             
     except Exception as e:
         import traceback
         traceback.print_exc()
         messagebox.showerror("ข้อผิดพลาด", f"ระบบเกิดขัดข้อง:\n{str(e)}")
-# --- การตั้งค่า GUI ---
+
+# ---------------------------------------------------------
+# การตั้งค่า GUI
+# ---------------------------------------------------------
 root = tk.Tk()
-root.title("SUT Pre-CapStone: DWT Watermarking + AI")
+root.title("SUT Pre-CapStone: DWT Watermarking + AI (CNN Edition)")
 root.geometry("450x500")
 
 def show_frame(frame):
@@ -204,7 +228,7 @@ for frame in (frame_home, frame_register, frame_login):
     frame.grid(row=0, column=0, sticky='nsew')
 
 # === 1. หน้าหลัก (Home) ===
-tk.Label(frame_home, text="ระบบยืนยันตัวตน 2 ขั้นตอน (DWT + AI)", font=("Arial", 16, "bold")).pack(pady=60)
+tk.Label(frame_home, text="ระบบยืนยันตัวตน 2 ขั้นตอน (DWT + AI CNN)", font=("Arial", 14, "bold")).pack(pady=60)
 tk.Button(frame_home, text="📝 ลงทะเบียน (Register)", font=("Arial", 12), command=lambda: show_frame(frame_register), bg="#2196F3", fg="white", width=25, height=2).pack(pady=10)
 tk.Button(frame_home, text="✅ เข้าสู่ระบบ (Login)", font=("Arial", 12), command=lambda: show_frame(frame_login), bg="#4CAF50", fg="white", width=25, height=2).pack(pady=10)
 

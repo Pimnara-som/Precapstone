@@ -1,7 +1,6 @@
 # auth.py
 import face_recognition
-from skimage.metrics import structural_similarity as ssim 
-from config import FACE_TOLERANCE, SSIM_THRESHOLD 
+from config import FACE_TOLERANCE 
 
 def verify_face(known_image_path, unknown_image_path):
     """ตรวจสอบว่าใบหน้าตรงกันหรือไม่"""
@@ -24,8 +23,4 @@ def verify_face(known_image_path, unknown_image_path):
         print(f"Face verification error: {e}")
         return False
 
-def verify_object_key(extracted_wm, original_wm):
-    """ตรวจสอบความคล้ายคลึงของ Object Key ด้วย SSIM"""
-    score = ssim(extracted_wm, original_wm, data_range=original_wm.max() - original_wm.min())
-    print(f"SSIM Score: {score:.4f}") # พิมพ์ค่าให้ดูใน Terminal เพื่อใช้ปรับจูน
-    return score >= SSIM_THRESHOLD
+# (ลบ verify_object_key และการ import ssim ออกไปได้เลยครับ)

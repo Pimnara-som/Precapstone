@@ -14,16 +14,16 @@ def preprocess_image(img_path, size):
 def embed_watermark(face_img, watermark_img):
     """ฝังลายน้ำลงในภาพใบหน้าด้วย DWT"""
     # ปรับสเกลลายน้ำ
-    watermark_normalized = watermark_img / 255.0
+    watermark_normalized = watermark_img / 255.0 # ปรับสเกลให้อยู่ในช่วง [0, 1]
 
     # 1 Level 2D-DWT
     coeffs2 = pywt.dwt2(face_img, WAVELET)
     LL, (HL, LH, HH) = coeffs2
 
     # สมการฝังลายน้ำ: HL' = HL + alpha * W
-    HL_watermarked = HL + (ALPHA * watermark_normalized * np.max(HL))
+    HL_watermarked = HL + (ALPHA * watermark_normalized * np.max(HL))#คือค่าใหม่ที่ซ่อนลายน้ำแล้ว
 
-    # Inverse DWT
+    # Inverse DWT รวมภาพใบหน้าที่มีลายน้ำ
     coeffs2_watermarked = LL, (HL_watermarked, LH, HH)
     watermarked_face = pywt.idwt2(coeffs2_watermarked, WAVELET)
     

@@ -1,9 +1,9 @@
 # config.py
-ALPHA = 0.05
+ALPHA = 0.10
 WAVELET = 'haar'
 IMG_SIZE = 512
 WM_SIZE = 256
 
-# ตัวแปรที่ auth.py เรียกใช้
+# ตัวแปรระบบยืนยันตัวตน
 FACE_TOLERANCE = 0.6
-SSIM_THRESHOLD = 0.50 # ปรับลดลงเพื่อให้รองรับ Noise จาก DWT และการครอบตัดภาพของ AI
+CNN_SIM_THRESHOLD = 0.65 # เปลี่ยนจาก SSIM เป็นเกณฑ์ความเหมือนของ CNN (แนะนำ 0.65 - 0.70)
