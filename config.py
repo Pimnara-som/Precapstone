@@ -6,4 +6,4 @@ WM_SIZE = 256
 
 # ตัวแปรที่ auth.py เรียกใช้
 FACE_TOLERANCE = 0.6
-SSIM_THRESHOLD = 0.7 # ค่าแนะนำสำหรับงานวิจัย DWT Watermarking ของ Som
+SSIM_THRESHOLD = 0.50 # ปรับลดลงเพื่อให้รองรับ Noise จาก DWT และการครอบตัดภาพของ AI
